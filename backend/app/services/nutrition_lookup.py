@@ -22,6 +22,24 @@ OPEN_FOOD_FACTS_FIELDS = ",".join(
 )
 
 
+def _barcode_variants(barcode: str) -> list[str]:
+    digits = "".join(char for char in barcode if char.isdigit())
+    if not digits:
+        return []
+
+    variants = [digits]
+
+    # UPC-A products are often stored in Open Food Facts as EAN-13.
+    if len(digits) == 12:
+        variants.append(f"0{digits}")
+
+    # Some catalogs expose the same item as GTIN-14 with leading zero padding.
+    if len(digits) < 14:
+        variants.append(digits.zfill(14))
+
+    return list(dict.fromkeys(variants))
+
+
 def _to_float(value: Any) -> Optional[float]:
     if value is None or value == "":
         return None
@@ -52,30 +70,33 @@ def _extract_nutrition(nutriments: dict[str, Any], suffix: str) -> NutritionFact
 
 async def lookup_barcode_nutrition(barcode: str) -> NutritionLookupResponse:
     async with httpx.AsyncClient(timeout=10.0, headers=OPEN_FOOD_FACTS_HEADERS) as client:
-        response = await client.get(
-            f"{OPEN_FOOD_FACTS_URL}/{barcode}",
-            params={"fields": OPEN_FOOD_FACTS_FIELDS},
-        )
+        for candidate in _barcode_variants(barcode):
+            response = await client.get(
+                f"{OPEN_FOOD_FACTS_URL}/{candidate}",
+                params={"fields": OPEN_FOOD_FACTS_FIELDS},
+            )
 
-    if response.status_code == 404:
-        raise HTTPException(status_code=404, detail="Barcode not found")
+            if response.status_code == 404:
+                continue
 
-    response.raise_for_status()
-    payload = response.json()
+            response.raise_for_status()
+            payload = response.json()
 
-    if payload.get("status") != 1 or not payload.get("product"):
-        raise HTTPException(status_code=404, detail="Barcode not found")
+            if payload.get("status") != 1 or not payload.get("product"):
+                continue
 
-    product = payload["product"]
-    nutriments = product.get("nutriments", {})
+            product = payload["product"]
+            nutriments = product.get("nutriments", {})
 
-    return NutritionLookupResponse(
-        barcode=barcode,
-        product_name=product.get("product_name"),
-        brand=product.get("brands"),
-        quantity=product.get("quantity"),
-        serving_size=product.get("serving_size"),
-        image_url=product.get("image_url"),
-        nutrition_per_100g=_extract_nutrition(nutriments, "100g"),
-        nutrition_per_serving=_extract_nutrition(nutriments, "serving"),
-    )
+            return NutritionLookupResponse(
+                barcode=candidate,
+                product_name=product.get("product_name"),
+                brand=product.get("brands"),
+                quantity=product.get("quantity"),
+                serving_size=product.get("serving_size"),
+                image_url=product.get("image_url"),
+                nutrition_per_100g=_extract_nutrition(nutriments, "100g"),
+                nutrition_per_serving=_extract_nutrition(nutriments, "serving"),
+            )
+
+    raise HTTPException(status_code=404, detail="Barcode not found")
