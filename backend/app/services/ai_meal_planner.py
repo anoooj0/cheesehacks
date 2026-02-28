@@ -2,7 +2,11 @@ import os
 from openai import AsyncOpenAI
 from app.models.meal import MealPlanRequest, MealPlanResponse, DayPlan, Meal
 
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+def _get_client() -> AsyncOpenAI:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+    return AsyncOpenAI(api_key=api_key)
 
 
 async def generate_meal_plan(request: MealPlanRequest) -> MealPlanResponse:
@@ -33,7 +37,7 @@ Respond in JSON with this structure:
 }}
 """
 
-    response = await client.chat.completions.create(
+    response = await _get_client().chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},

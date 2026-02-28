@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -6,7 +6,6 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -14,154 +13,102 @@ import { CameraView, BarcodeScanningResult, useCameraPermissions } from 'expo-ca
 import { useRouter } from 'expo-router';
 
 import { useApp } from '@/context/AppContext';
-import { lookupNutritionByBarcode, NutritionLookupResponse, optimizeCart } from '@/services/api';
-
-const STORES = [
-  { id: 'walmart', label: 'Walmart' },
-  { id: 'kroger', label: 'Kroger' },
-  { id: 'aldi', label: 'Aldi' },
-  { id: 'target', label: 'Target' },
-];
-
-const DIETARY_OPTIONS = [
-  { id: 'vegetarian', label: 'Vegetarian' },
-  { id: 'vegan', label: 'Vegan' },
-  { id: 'gluten-free', label: 'Gluten-Free' },
-  { id: 'dairy-free', label: 'Dairy-Free' },
-];
+import { getPrices, lookupNutritionByBarcode, GroceryItem, NutritionLookupResponse } from '@/services/api';
 
 const PRIMARY = '#0a7ea4';
+const GREEN = '#2e7d32';
+
+const STORE_LABELS: Record<string, string> = {
+  all: 'All Stores',
+  walmart: 'Walmart',
+  kroger: 'Kroger',
+  aldi: 'Aldi',
+  target: 'Target',
+};
 
 function formatValue(value: number | null, unit: string) {
-  if (value == null) {
-    return '--';
-  }
+  if (value == null) return '--';
   return `${value.toFixed(1)}${unit}`;
 }
 
-function hasNutritionData(values: NutritionLookupResponse['nutrition_per_serving']) {
-  return Object.values(values).some((value) => value != null);
-}
-
-function NutritionRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <View style={styles.nutritionRow}>
-      <Text style={styles.nutritionLabel}>{label}</Text>
-      <Text style={styles.nutritionValue}>{value}</Text>
-    </View>
-  );
+function hasNutritionData(facts: NutritionLookupResponse['nutrition_per_serving']) {
+  return Object.values(facts).some((v) => v != null);
 }
 
 export default function HomeScreen() {
   const router = useRouter();
   const [permission, requestPermission] = useCameraPermissions();
-  const {
-    budget,
-    setBudget,
-    selectedStores,
-    setSelectedStores,
-    dietaryPreferences,
-    setDietaryPreferences,
-    numDays,
-    setNumDays,
-    setCartResult,
-  } = useApp();
+  const { addScannedItem, mealPlanResult } = useApp();
 
-  const [loading, setLoading] = useState(false);
+  // Store prices
+  const [prices, setPrices] = useState<GroceryItem[]>([]);
+  const [pricesLoading, setPricesLoading] = useState(true);
+  const [selectedStore, setSelectedStore] = useState('all');
+
+  // Barcode scanner
   const [scannerVisible, setScannerVisible] = useState(false);
   const [barcode, setBarcode] = useState<string | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
   const [nutrition, setNutrition] = useState<NutritionLookupResponse | null>(null);
 
-  function toggleItem(id: string, list: string[], setList: (v: string[]) => void) {
-    setList(list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
+  useEffect(() => {
+    getPrices()
+      .then(setPrices)
+      .catch(() => {})
+      .finally(() => setPricesLoading(false));
+  }, []);
+
+  const stores = ['all', ...Array.from(new Set(prices.map((p) => p.store_id)))];
+  const filteredPrices =
+    selectedStore === 'all' ? prices : prices.filter((p) => p.store_id === selectedStore);
+
+  async function openScanner() {
+    if (!permission?.granted) {
+      const res = await requestPermission();
+      if (!res.granted) {
+        Alert.alert('Camera access required', 'Enable camera access to scan barcodes.');
+        return;
+      }
+    }
+    setScannerVisible(true);
   }
 
-  async function handleOptimize() {
-    if (!budget || parseFloat(budget) <= 0) {
-      Alert.alert('Enter a valid budget');
-      return;
-    }
-    if (selectedStores.length === 0) {
-      Alert.alert('Select at least one store');
-      return;
-    }
-    try {
-      setLoading(true);
-      const result = await optimizeCart(
-        parseFloat(budget),
-        selectedStores,
-        dietaryPreferences,
-        numDays
-      );
-      setCartResult(result);
-      router.push('/(tabs)/cart');
-    } catch {
-      Alert.alert('Error', 'Could not reach the server. Make sure the backend is running.');
-    } finally {
-      setLoading(false);
-    }
-  }
+  async function handleBarcodeScanned(result: BarcodeScanningResult) {
+    if (!scannerVisible) return;
+    const scanned = result.data?.trim();
+    if (!scanned) return;
 
-  async function fetchNutrition(scannedBarcode: string) {
+    setScannerVisible(false);
+    setBarcode(scanned);
+    setNutrition(null);
+
     try {
       setLookupLoading(true);
-      const result = await lookupNutritionByBarcode(scannedBarcode);
-      setNutrition(result);
+      const data = await lookupNutritionByBarcode(scanned);
+      setNutrition(data);
     } catch {
-      setNutrition(null);
-      Alert.alert(
-        'Nutrition lookup failed',
-        'The barcode was scanned, but nutrition data was not found for this product.'
-      );
+      Alert.alert('Not found', 'No nutrition data found for this barcode.');
     } finally {
       setLookupLoading(false);
     }
   }
 
-  async function openScanner() {
-    if (!permission?.granted) {
-      const response = await requestPermission();
-      if (!response.granted) {
-        Alert.alert('Camera access required', 'Enable camera access to scan food barcodes.');
-        return;
-      }
-    }
-
-    setScannerVisible(true);
+  function handleAddToCart() {
+    if (!nutrition) return;
+    addScannedItem(nutrition);
+    Alert.alert('Added', `${nutrition.product_name || 'Item'} added to cart.`);
+    setNutrition(null);
+    setBarcode(null);
   }
 
-  function closeScanner() {
-    setScannerVisible(false);
-  }
-
-  async function handleBarcodeScanned(result: BarcodeScanningResult) {
-    if (!scannerVisible) {
-      return;
-    }
-
-    const scannedBarcode = result.data?.trim();
-    if (!scannedBarcode) {
-      return;
-    }
-
-    setScannerVisible(false);
-    setBarcode(scannedBarcode);
-    await fetchNutrition(scannedBarcode);
-  }
-
-  const nutritionFacts = nutrition && hasNutritionData(nutrition.nutrition_per_serving)
-    ? nutrition.nutrition_per_serving
-    : nutrition?.nutrition_per_100g ?? null;
-  const servingLabel = nutrition && hasNutritionData(nutrition.nutrition_per_serving)
-    ? nutrition.serving_size || 'per serving'
-    : 'per 100g';
+  const nutritionFacts =
+    nutrition && hasNutritionData(nutrition.nutrition_per_serving)
+      ? nutrition.nutrition_per_serving
+      : nutrition?.nutrition_per_100g ?? null;
+  const servingLabel =
+    nutrition && hasNutritionData(nutrition.nutrition_per_serving)
+      ? nutrition.serving_size || 'per serving'
+      : 'per 100g';
 
   return (
     <>
@@ -171,153 +118,150 @@ export default function HomeScreen() {
           <Text style={styles.subtitle}>Eat smart. Spend smarter.</Text>
         </View>
 
+        {/* ── Store Prices ── */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Weekly Budget</Text>
-          <View style={styles.inputRow}>
-            <Text style={styles.dollar}>$</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="0.00"
-              placeholderTextColor="#999"
-              keyboardType="decimal-pad"
-              value={budget}
-              onChangeText={setBudget}
-            />
+          <View style={styles.sectionRow}>
+            <Text style={styles.sectionTitle}>Store Prices</Text>
+            <View style={styles.badge}>
+              <Text style={styles.badgeText}>Kroger API soon</Text>
+            </View>
           </View>
-        </View>
 
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Nearby Stores</Text>
-          <View style={styles.chipRow}>
-            {STORES.map((store) => {
-              const selected = selectedStores.includes(store.id);
-              return (
-                <TouchableOpacity
-                  key={store.id}
-                  style={[styles.chip, selected && styles.chipSelected]}
-                  onPress={() => toggleItem(store.id, selectedStores, setSelectedStores)}>
-                  <Text style={[styles.chipText, selected && styles.chipTextSelected]}>
-                    {store.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Dietary Preferences</Text>
-          <View style={styles.chipRow}>
-            {DIETARY_OPTIONS.map((opt) => {
-              const selected = dietaryPreferences.includes(opt.id);
-              return (
-                <TouchableOpacity
-                  key={opt.id}
-                  style={[styles.chip, selected && styles.chipSelected]}
-                  onPress={() =>
-                    toggleItem(opt.id, dietaryPreferences, setDietaryPreferences)
-                  }>
-                  <Text style={[styles.chipText, selected && styles.chipTextSelected]}>
-                    {opt.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Meal Plan Duration</Text>
-          <View style={styles.daysRow}>
-            {[3, 5, 7, 14].map((d) => (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.storeTabs}>
+            {stores.map((s) => (
               <TouchableOpacity
-                key={d}
-                style={[styles.dayChip, numDays === d && styles.chipSelected]}
-                onPress={() => setNumDays(d)}>
-                <Text style={[styles.chipText, numDays === d && styles.chipTextSelected]}>
-                  {d} days
+                key={s}
+                style={[styles.storeTab, selectedStore === s && styles.storeTabSelected]}
+                onPress={() => setSelectedStore(s)}>
+                <Text style={[styles.storeTabText, selectedStore === s && styles.storeTabTextSelected]}>
+                  {STORE_LABELS[s] ?? s}
                 </Text>
               </TouchableOpacity>
             ))}
-          </View>
+          </ScrollView>
+
+          {pricesLoading ? (
+            <ActivityIndicator color={PRIMARY} style={{ marginTop: 16 }} />
+          ) : filteredPrices.length === 0 ? (
+            <Text style={styles.emptyNote}>No items available</Text>
+          ) : (
+            filteredPrices.slice(0, 8).map((item, i) => (
+              <View key={i} style={styles.priceRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.itemName}>{item.name}</Text>
+                  <Text style={styles.itemMeta}>{item.store_name} · {item.unit}</Text>
+                </View>
+                <Text style={styles.itemPrice}>${item.price.toFixed(2)}</Text>
+              </View>
+            ))
+          )}
         </View>
 
-        <TouchableOpacity
-          style={[styles.button, loading && styles.buttonDisabled]}
-          onPress={handleOptimize}
-          disabled={loading}>
-          {loading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.buttonText}>Optimize My Cart</Text>
-          )}
-        </TouchableOpacity>
-
-        <View style={styles.scanSection}>
-          <Text style={styles.sectionTitle}>Scan Nutrition Label</Text>
-          <Text style={styles.scanSubtitle}>
-            Use your phone camera to scan a UPC or EAN barcode, then fetch nutrition facts
-            from the backend.
+        {/* ── Barcode Scanner ── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Scan a Product</Text>
+          <Text style={styles.sectionSub}>
+            Scan a UPC or EAN barcode to look up nutrition facts and add it to your cart.
           </Text>
+
           <TouchableOpacity style={styles.scanButton} onPress={openScanner}>
             <Text style={styles.scanButtonText}>Open Barcode Scanner</Text>
           </TouchableOpacity>
 
-          {barcode ? (
-            <Text style={styles.barcodeText}>Last barcode: {barcode}</Text>
-          ) : null}
+          {barcode && <Text style={styles.barcodeText}>Barcode: {barcode}</Text>}
 
-          {lookupLoading ? (
-            <View style={styles.lookupLoading}>
+          {lookupLoading && (
+            <View style={styles.loadingRow}>
               <ActivityIndicator color={PRIMARY} />
-              <Text style={styles.lookupText}>Looking up nutrition data...</Text>
+              <Text style={styles.loadingText}>Looking up nutrition...</Text>
             </View>
-          ) : null}
+          )}
 
-          {nutrition && nutritionFacts ? (
+          {nutrition && nutritionFacts && (
             <View style={styles.nutritionCard}>
               <Text style={styles.nutritionTitle}>
                 {nutrition.product_name || 'Unknown product'}
               </Text>
               <Text style={styles.nutritionMeta}>
-                {[nutrition.brand, nutrition.quantity].filter(Boolean).join(' • ') || nutrition.barcode}
+                {[nutrition.brand, nutrition.quantity].filter(Boolean).join(' · ') || nutrition.barcode}
               </Text>
               <Text style={styles.nutritionMeta}>Nutrition {servingLabel}</Text>
-              <NutritionRow
-                label="Calories"
-                value={formatValue(nutritionFacts.calories, ' kcal')}
-              />
-              <NutritionRow
-                label="Protein"
-                value={formatValue(nutritionFacts.protein_g, ' g')}
-              />
-              <NutritionRow label="Carbs" value={formatValue(nutritionFacts.carbs_g, ' g')} />
-              <NutritionRow label="Fat" value={formatValue(nutritionFacts.fat_g, ' g')} />
-              <NutritionRow label="Fiber" value={formatValue(nutritionFacts.fiber_g, ' g')} />
-              <NutritionRow label="Sugar" value={formatValue(nutritionFacts.sugars_g, ' g')} />
-              <NutritionRow
-                label="Sodium"
-                value={formatValue(nutritionFacts.sodium_mg, ' mg')}
-              />
+
+              {(
+                [
+                  ['Calories', formatValue(nutritionFacts.calories, ' kcal')],
+                  ['Protein', formatValue(nutritionFacts.protein_g, ' g')],
+                  ['Carbs', formatValue(nutritionFacts.carbs_g, ' g')],
+                  ['Fat', formatValue(nutritionFacts.fat_g, ' g')],
+                  ['Fiber', formatValue(nutritionFacts.fiber_g, ' g')],
+                  ['Sugar', formatValue(nutritionFacts.sugars_g, ' g')],
+                  ['Sodium', formatValue(nutritionFacts.sodium_mg, ' mg')],
+                ] as [string, string][]
+              ).map(([label, value]) => (
+                <View key={label} style={styles.nutritionRow}>
+                  <Text style={styles.nutritionLabel}>{label}</Text>
+                  <Text style={styles.nutritionValue}>{value}</Text>
+                </View>
+              ))}
+
+              <TouchableOpacity style={styles.addButton} onPress={handleAddToCart}>
+                <Text style={styles.addButtonText}>+ Add to Cart</Text>
+              </TouchableOpacity>
             </View>
-          ) : null}
+          )}
+        </View>
+
+        {/* ── Meal Plan ── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Meal Plan</Text>
+          {mealPlanResult ? (
+            <View style={styles.mealPlanCard}>
+              <Text style={styles.mealPlanTitle}>
+                {mealPlanResult.meal_plan.length}-Day Plan Active
+              </Text>
+              <Text style={styles.mealPlanMeta}>
+                Est. total: ${mealPlanResult.total_cost.toFixed(2)}
+              </Text>
+              <TouchableOpacity
+                style={styles.viewPlanButton}
+                onPress={() => router.push('/(tabs)/meal-plan')}>
+                <Text style={styles.viewPlanText}>View Full Plan</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={styles.mealPlanCard}>
+              <Text style={styles.mealPlanMeta}>No meal plan yet.</Text>
+              <Text style={[styles.mealPlanMeta, { marginBottom: 12 }]}>
+                Go to Cart and tap "Generate Meal Plan".
+              </Text>
+              <TouchableOpacity
+                style={styles.viewPlanButton}
+                onPress={() => router.push('/(tabs)/cart')}>
+                <Text style={styles.viewPlanText}>Go to Cart</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
       </ScrollView>
 
-      <Modal visible={scannerVisible} animationType="slide" onRequestClose={closeScanner}>
+      {/* Camera Modal */}
+      <Modal
+        visible={scannerVisible}
+        animationType="slide"
+        onRequestClose={() => setScannerVisible(false)}>
         <View style={styles.modalContainer}>
           <CameraView
             style={styles.camera}
             facing="back"
-            barcodeScannerSettings={{
-              barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e'],
-            }}
+            barcodeScannerSettings={{ barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e'] }}
             onBarcodeScanned={handleBarcodeScanned}
           />
           <View style={styles.cameraOverlay}>
-            <View style={styles.scannerFrame} />
-            <Text style={styles.cameraText}>Center the barcode inside the frame.</Text>
-            <TouchableOpacity style={styles.closeButton} onPress={closeScanner}>
+            <View style={styles.scanFrame} />
+            <Text style={styles.cameraHint}>Center the barcode inside the frame</Text>
+            <TouchableOpacity
+              style={styles.closeButton}
+              onPress={() => setScannerVisible(false)}>
               <Text style={styles.closeButtonText}>Close</Text>
             </TouchableOpacity>
           </View>
@@ -329,68 +273,57 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f5f7fa' },
-  content: { padding: 24, paddingBottom: 48 },
-  header: { marginBottom: 32, marginTop: 16 },
+  content: { padding: 20, paddingBottom: 48 },
+  header: { marginBottom: 28, marginTop: 12 },
   title: { fontSize: 28, fontWeight: '700', color: '#11181C' },
   subtitle: { fontSize: 15, color: '#687076', marginTop: 4 },
-  section: { marginBottom: 24 },
-  sectionTitle: { fontSize: 16, fontWeight: '600', color: '#11181C', marginBottom: 12 },
-  inputRow: {
+
+  section: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#e8edf2',
+  },
+  sectionRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  sectionTitle: { fontSize: 16, fontWeight: '700', color: '#11181C', flex: 1 },
+  sectionSub: { fontSize: 13, color: '#687076', marginBottom: 14, lineHeight: 18 },
+
+  badge: {
+    backgroundColor: '#fff3e0',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  badgeText: { fontSize: 11, color: '#e65100', fontWeight: '600' },
+
+  storeTabs: { marginBottom: 12 },
+  storeTab: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: '#e0e0e0',
+    marginRight: 8,
+    backgroundColor: '#f9f9f9',
+  },
+  storeTabSelected: { backgroundColor: PRIMARY, borderColor: PRIMARY },
+  storeTabText: { fontSize: 13, color: '#687076', fontWeight: '500' },
+  storeTabTextSelected: { color: '#fff' },
+
+  priceRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: '#e0e0e0',
-    paddingHorizontal: 16,
-  },
-  dollar: { fontSize: 20, color: '#11181C', marginRight: 4 },
-  input: { flex: 1, fontSize: 20, paddingVertical: 14, color: '#11181C' },
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  daysRow: { flexDirection: 'row', gap: 10 },
-  chip: {
-    paddingHorizontal: 16,
     paddingVertical: 10,
-    borderRadius: 20,
-    borderWidth: 1.5,
-    borderColor: '#e0e0e0',
-    backgroundColor: '#fff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
   },
-  dayChip: {
-    flex: 1,
-    alignItems: 'center',
-    paddingVertical: 10,
-    borderRadius: 20,
-    borderWidth: 1.5,
-    borderColor: '#e0e0e0',
-    backgroundColor: '#fff',
-  },
-  chipSelected: { backgroundColor: PRIMARY, borderColor: PRIMARY },
-  chipText: { fontSize: 14, color: '#11181C', fontWeight: '500' },
-  chipTextSelected: { color: '#fff' },
-  button: {
-    backgroundColor: PRIMARY,
-    borderRadius: 14,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  buttonDisabled: { opacity: 0.6 },
-  buttonText: { color: '#fff', fontSize: 17, fontWeight: '700' },
-  scanSection: {
-    marginTop: 28,
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: '#d8e3e8',
-  },
-  scanSubtitle: {
-    fontSize: 14,
-    color: '#687076',
-    lineHeight: 20,
-    marginBottom: 16,
-  },
+  itemName: { fontSize: 14, fontWeight: '600', color: '#11181C' },
+  itemMeta: { fontSize: 12, color: '#687076', marginTop: 2 },
+  itemPrice: { fontSize: 15, fontWeight: '700', color: PRIMARY },
+  emptyNote: { fontSize: 14, color: '#687076', marginTop: 8, textAlign: 'center' },
+
   scanButton: {
     backgroundColor: '#11181C',
     borderRadius: 12,
@@ -398,30 +331,46 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   scanButtonText: { color: '#fff', fontSize: 15, fontWeight: '700' },
-  barcodeText: { marginTop: 14, color: '#334155', fontSize: 14 },
-  lookupLoading: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginTop: 14,
-  },
-  lookupText: { color: '#334155', fontSize: 14 },
+  barcodeText: { marginTop: 10, fontSize: 13, color: '#687076' },
+
+  loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 14 },
+  loadingText: { fontSize: 14, color: '#687076' },
+
   nutritionCard: {
-    marginTop: 18,
-    paddingTop: 18,
+    marginTop: 16,
+    paddingTop: 16,
     borderTopWidth: 1,
-    borderTopColor: '#e2e8f0',
-    gap: 10,
+    borderTopColor: '#e8edf2',
+    gap: 8,
   },
-  nutritionTitle: { fontSize: 18, fontWeight: '700', color: '#11181C' },
-  nutritionMeta: { fontSize: 14, color: '#687076' },
-  nutritionRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
+  nutritionTitle: { fontSize: 17, fontWeight: '700', color: '#11181C' },
+  nutritionMeta: { fontSize: 13, color: '#687076' },
+  nutritionRow: { flexDirection: 'row', justifyContent: 'space-between' },
   nutritionLabel: { fontSize: 14, color: '#334155' },
-  nutritionValue: { fontSize: 14, color: '#11181C', fontWeight: '600' },
+  nutritionValue: { fontSize: 14, fontWeight: '600', color: '#11181C' },
+
+  addButton: {
+    backgroundColor: GREEN,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  addButtonText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+
+  mealPlanCard: { gap: 6 },
+  mealPlanTitle: { fontSize: 15, fontWeight: '700', color: '#11181C' },
+  mealPlanMeta: { fontSize: 13, color: '#687076' },
+  viewPlanButton: {
+    backgroundColor: PRIMARY,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  viewPlanText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+
+  // Camera
   modalContainer: { flex: 1, backgroundColor: '#000' },
   camera: { flex: 1 },
   cameraOverlay: {
@@ -429,9 +378,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 24,
-    backgroundColor: 'rgba(0, 0, 0, 0.35)',
+    backgroundColor: 'rgba(0,0,0,0.35)',
   },
-  scannerFrame: {
+  scanFrame: {
     width: '88%',
     height: 180,
     borderRadius: 20,
@@ -439,17 +388,12 @@ const styles = StyleSheet.create({
     borderColor: '#fff',
     backgroundColor: 'transparent',
   },
-  cameraText: {
-    marginTop: 24,
-    color: '#fff',
-    fontSize: 16,
-    textAlign: 'center',
-  },
+  cameraHint: { marginTop: 24, color: '#fff', fontSize: 15, textAlign: 'center' },
   closeButton: {
     marginTop: 24,
     backgroundColor: '#fff',
     borderRadius: 999,
-    paddingHorizontal: 20,
+    paddingHorizontal: 24,
     paddingVertical: 12,
   },
   closeButtonText: { color: '#11181C', fontWeight: '700' },

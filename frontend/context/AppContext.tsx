@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState } from 'react';
-import { OptimizeResponse, MealPlanResponse } from '@/services/api';
+import { OptimizeResponse, MealPlanResponse, NutritionLookupResponse } from '@/services/api';
 
 interface AppState {
   budget: string;
@@ -14,6 +14,9 @@ interface AppState {
   setCartResult: (v: OptimizeResponse | null) => void;
   mealPlanResult: MealPlanResponse | null;
   setMealPlanResult: (v: MealPlanResponse | null) => void;
+  scannedItems: NutritionLookupResponse[];
+  addScannedItem: (item: NutritionLookupResponse) => void;
+  removeScannedItem: (barcode: string) => void;
 }
 
 const AppContext = createContext<AppState | null>(null);
@@ -25,6 +28,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [numDays, setNumDays] = useState(7);
   const [cartResult, setCartResult] = useState<OptimizeResponse | null>(null);
   const [mealPlanResult, setMealPlanResult] = useState<MealPlanResponse | null>(null);
+  const [scannedItems, setScannedItems] = useState<NutritionLookupResponse[]>([]);
+
+  function addScannedItem(item: NutritionLookupResponse) {
+    setScannedItems((prev) => [...prev, item]);
+  }
+
+  function removeScannedItem(barcode: string) {
+    setScannedItems((prev) => prev.filter((i) => i.barcode !== barcode));
+  }
 
   return (
     <AppContext.Provider
@@ -35,6 +47,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         numDays, setNumDays,
         cartResult, setCartResult,
         mealPlanResult, setMealPlanResult,
+        scannedItems, addScannedItem, removeScannedItem,
       }}>
       {children}
     </AppContext.Provider>
