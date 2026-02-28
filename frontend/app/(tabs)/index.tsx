@@ -1,98 +1,219 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import React, { useState } from 'react';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  ScrollView,
+  StyleSheet,
+  ActivityIndicator,
+  Alert,
+} from 'react-native';
+import { useRouter } from 'expo-router';
+import { useApp } from '@/context/AppContext';
+import { optimizeCart } from '@/services/api';
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+const STORES = [
+  { id: 'walmart', label: 'Walmart' },
+  { id: 'kroger', label: 'Kroger' },
+  { id: 'aldi', label: 'Aldi' },
+  { id: 'target', label: 'Target' },
+];
+
+const DIETARY_OPTIONS = [
+  { id: 'vegetarian', label: 'Vegetarian' },
+  { id: 'vegan', label: 'Vegan' },
+  { id: 'gluten-free', label: 'Gluten-Free' },
+  { id: 'dairy-free', label: 'Dairy-Free' },
+];
 
 export default function HomeScreen() {
-  return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+  const router = useRouter();
+  const {
+    budget, setBudget,
+    selectedStores, setSelectedStores,
+    dietaryPreferences, setDietaryPreferences,
+    numDays, setNumDays,
+    setCartResult,
+  } = useApp();
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+  const [loading, setLoading] = useState(false);
+
+  function toggleItem(id: string, list: string[], setList: (v: string[]) => void) {
+    setList(list.includes(id) ? list.filter(x => x !== id) : [...list, id]);
+  }
+
+  async function handleOptimize() {
+    if (!budget || parseFloat(budget) <= 0) {
+      Alert.alert('Enter a valid budget');
+      return;
+    }
+    if (selectedStores.length === 0) {
+      Alert.alert('Select at least one store');
+      return;
+    }
+    try {
+      setLoading(true);
+      const result = await optimizeCart(
+        parseFloat(budget),
+        selectedStores,
+        dietaryPreferences,
+        numDays,
+      );
+      setCartResult(result);
+      router.push('/(tabs)/cart');
+    } catch {
+      Alert.alert('Error', 'Could not reach the server. Make sure the backend is running.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      <View style={styles.header}>
+        <Text style={styles.title}>Grocery Optimizer</Text>
+        <Text style={styles.subtitle}>Eat smart. Spend smarter.</Text>
+      </View>
+
+      {/* Budget */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Weekly Budget</Text>
+        <View style={styles.inputRow}>
+          <Text style={styles.dollar}>$</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="0.00"
+            placeholderTextColor="#999"
+            keyboardType="decimal-pad"
+            value={budget}
+            onChangeText={setBudget}
+          />
+        </View>
+      </View>
+
+      {/* Stores */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Nearby Stores</Text>
+        <View style={styles.chipRow}>
+          {STORES.map(store => {
+            const selected = selectedStores.includes(store.id);
+            return (
+              <TouchableOpacity
+                key={store.id}
+                style={[styles.chip, selected && styles.chipSelected]}
+                onPress={() => toggleItem(store.id, selectedStores, setSelectedStores)}>
+                <Text style={[styles.chipText, selected && styles.chipTextSelected]}>
+                  {store.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
+      {/* Dietary Preferences */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Dietary Preferences</Text>
+        <View style={styles.chipRow}>
+          {DIETARY_OPTIONS.map(opt => {
+            const selected = dietaryPreferences.includes(opt.id);
+            return (
+              <TouchableOpacity
+                key={opt.id}
+                style={[styles.chip, selected && styles.chipSelected]}
+                onPress={() => toggleItem(opt.id, dietaryPreferences, setDietaryPreferences)}>
+                <Text style={[styles.chipText, selected && styles.chipTextSelected]}>
+                  {opt.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
+      {/* Number of Days */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Meal Plan Duration</Text>
+        <View style={styles.daysRow}>
+          {[3, 5, 7, 14].map(d => (
+            <TouchableOpacity
+              key={d}
+              style={[styles.dayChip, numDays === d && styles.chipSelected]}
+              onPress={() => setNumDays(d)}>
+              <Text style={[styles.chipText, numDays === d && styles.chipTextSelected]}>
+                {d} days
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+
+      {/* CTA */}
+      <TouchableOpacity
+        style={[styles.button, loading && styles.buttonDisabled]}
+        onPress={handleOptimize}
+        disabled={loading}>
+        {loading ? (
+          <ActivityIndicator color="#fff" />
+        ) : (
+          <Text style={styles.buttonText}>Optimize My Cart</Text>
+        )}
+      </TouchableOpacity>
+    </ScrollView>
   );
 }
 
+const PRIMARY = '#0a7ea4';
+
 const styles = StyleSheet.create({
-  titleContainer: {
+  container: { flex: 1, backgroundColor: '#f5f7fa' },
+  content: { padding: 24, paddingBottom: 48 },
+  header: { marginBottom: 32, marginTop: 16 },
+  title: { fontSize: 28, fontWeight: '700', color: '#11181C' },
+  subtitle: { fontSize: 15, color: '#687076', marginTop: 4 },
+  section: { marginBottom: 24 },
+  sectionTitle: { fontSize: 16, fontWeight: '600', color: '#11181C', marginBottom: 12 },
+  inputRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: '#e0e0e0',
+    paddingHorizontal: 16,
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+  dollar: { fontSize: 20, color: '#11181C', marginRight: 4 },
+  input: { flex: 1, fontSize: 20, paddingVertical: 14, color: '#11181C' },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  daysRow: { flexDirection: 'row', gap: 10 },
+  chip: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: '#e0e0e0',
+    backgroundColor: '#fff',
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  dayChip: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: '#e0e0e0',
+    backgroundColor: '#fff',
   },
+  chipSelected: { backgroundColor: PRIMARY, borderColor: PRIMARY },
+  chipText: { fontSize: 14, color: '#11181C', fontWeight: '500' },
+  chipTextSelected: { color: '#fff' },
+  button: {
+    backgroundColor: PRIMARY,
+    borderRadius: 14,
+    paddingVertical: 16,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  buttonDisabled: { opacity: 0.6 },
+  buttonText: { color: '#fff', fontSize: 17, fontWeight: '700' },
 });
