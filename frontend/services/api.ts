@@ -1,4 +1,4 @@
-const BASE_URL = 'http://localhost:8000';
+const BASE_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:8000';
 
 export interface GroceryItem {
   id: string;
@@ -46,6 +46,27 @@ export interface MealPlanResponse {
   total_cost: number;
 }
 
+export interface NutritionFacts {
+  calories: number | null;
+  protein_g: number | null;
+  carbs_g: number | null;
+  fat_g: number | null;
+  fiber_g: number | null;
+  sugars_g: number | null;
+  sodium_mg: number | null;
+}
+
+export interface NutritionLookupResponse {
+  barcode: string;
+  product_name: string | null;
+  brand: string | null;
+  quantity: string | null;
+  serving_size: string | null;
+  image_url: string | null;
+  nutrition_per_100g: NutritionFacts;
+  nutrition_per_serving: NutritionFacts;
+}
+
 export async function optimizeCart(
   budget: number,
   storeIds: string[],
@@ -87,5 +108,13 @@ export async function generateMealPlan(
 export async function getPrices(): Promise<GroceryItem[]> {
   const res = await fetch(`${BASE_URL}/prices/`);
   if (!res.ok) throw new Error('Failed to fetch prices');
+  return res.json();
+}
+
+export async function lookupNutritionByBarcode(
+  barcode: string
+): Promise<NutritionLookupResponse> {
+  const res = await fetch(`${BASE_URL}/nutrition/${barcode}`);
+  if (!res.ok) throw new Error('Failed to fetch nutrition data');
   return res.json();
 }
