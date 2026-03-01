@@ -10,4 +10,6 @@ async def list_prices():
     try:
         return await fetch_kroger_prices()
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Could not fetch live prices: {e}")
+        import traceback
+        print(f"[prices] ERROR: {traceback.format_exc()}")
+        raise HTTPException(status_code=503, detail=f"Could not fetch live prices: {type(e).__name__}: {e}")

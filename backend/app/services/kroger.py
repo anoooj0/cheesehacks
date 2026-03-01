@@ -4,6 +4,7 @@ import time
 import asyncio
 import httpx
 from typing import List
+from app.services.usda_nutrition import fetch_nutrition_per_100g, prefetch_all
 
 # Token cache
 _token: str | None = None
@@ -15,21 +16,44 @@ _price_cache_at: float = 0
 CACHE_TTL = 1800
 
 SEARCH_TERMS = [
+    # Proteins
     "chicken breast",
-    "brown rice",
-    "eggs",
-    "bananas",
-    "spinach",
-    "black beans",
-    "oats",
-    "milk",
-    "bread",
-    "apples",
     "ground beef",
     "salmon",
+    "eggs",
+    "tuna",
+    "turkey",
+    "tofu",
+    "shrimp",
+    # Produce
+    "bananas",
+    "apples",
+    "spinach",
     "broccoli",
     "sweet potato",
+    "carrots",
+    "tomatoes",
+    "avocado",
+    "oranges",
+    "grapes",
+    # Dairy
+    "milk",
     "greek yogurt",
+    "cheese",
+    "butter",
+    "cottage cheese",
+    # Grains
+    "brown rice",
+    "oats",
+    "bread",
+    "pasta",
+    "quinoa",
+    # Pantry
+    "black beans",
+    "peanut butter",
+    "olive oil",
+    "almonds",
+    "lentils",
 ]
 
 DEFAULT_LOCATION_ID = os.getenv("KROGER_LOCATION_ID", "53400434")
@@ -65,7 +89,7 @@ async def _get_token() -> str:
     return _token
 
 
-async def _fetch_term(client: httpx.AsyncClient, token: str, term: str, location_id: str, limit: int) -> List[dict]:
+async def _fetch_term(client: httpx.AsyncClient, token: str, term: str, location_id: str, limit: int, nutrition: dict) -> List[dict]:
     try:
         resp = await client.get(
             "https://api.kroger.com/v1/products",
@@ -95,10 +119,10 @@ async def _fetch_term(client: httpx.AsyncClient, token: str, term: str, location
                 "store_id": "metro-market",
                 "store_name": "Metro Market",
                 "unit": unit,
-                "calories_per_unit": 0,
-                "protein_per_unit": 0,
-                "carbs_per_unit": 0,
-                "fat_per_unit": 0,
+                "calories_per_unit": nutrition["cal"],
+                "protein_per_unit": nutrition["protein"],
+                "carbs_per_unit": nutrition["carbs"],
+                "fat_per_unit": nutrition["fat"],
             })
         return items
     except Exception:
@@ -115,13 +139,32 @@ async def fetch_kroger_prices(
     if _price_cache and time.time() < _price_cache_at + CACHE_TTL:
         return _price_cache
 
+    # Fetch Kroger token first, then USDA nutrition in parallel
     token = await _get_token()
+
+    nutrition_results = await asyncio.gather(
+        *[fetch_nutrition_per_100g(term) for term in SEARCH_TERMS],
+        return_exceptions=True,
+    )
+    _EMPTY = {"cal": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+    nutrition_by_term = {
+        term: (r if isinstance(r, dict) else _EMPTY)
+        for term, r in zip(SEARCH_TERMS, nutrition_results)
+    }
+
+    # Throttle Kroger product requests to avoid rate limits
+    sem = asyncio.Semaphore(8)
+
+    async def _limited(client: httpx.AsyncClient, term: str) -> List[dict]:
+        async with sem:
+            return await _fetch_term(client, token, term, location_id, limit_per_term, nutrition_by_term[term])
 
     async with httpx.AsyncClient() as client:
         results = await asyncio.gather(*[
-            _fetch_term(client, token, term, location_id, limit_per_term)
-            for term in SEARCH_TERMS
-        ])
+            _limited(client, term) for term in SEARCH_TERMS
+        ], return_exceptions=True)
+
+    results = [r if isinstance(r, list) else [] for r in results]
 
     items = [item for group in results for item in group]
     if items:
