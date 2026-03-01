@@ -54,6 +54,17 @@ SEARCH_TERMS = [
     "olive oil",
     "almonds",
     "lentils",
+    # Madison / Wisconsin local
+    "cranberries",
+    "bratwurst",
+    "walleye",
+    "cheese curds",
+    "sauerkraut",
+    "corn",
+    "beets",
+    "honey",
+    "cherries",
+    "kohlrabi",
 ]
 
 DEFAULT_LOCATION_ID = os.getenv("KROGER_LOCATION_ID", "53400434")
@@ -172,3 +183,36 @@ async def fetch_kroger_prices(
         _price_cache_at = time.time()
 
     return items
+
+
+async def fetch_price_by_upc(
+    upc: str,
+    location_id: str = DEFAULT_LOCATION_ID,
+) -> dict | None:
+    """Look up a product's price at Metro Market by UPC/barcode."""
+    token = await _get_token()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            "https://api.kroger.com/v1/products",
+            headers={"Authorization": f"Bearer {token}"},
+            params={
+                "filter.term": upc,
+                "filter.locationId": location_id,
+                "filter.limit": 1,
+            },
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json().get("data", [])
+        if not data:
+            return None
+        product = data[0]
+        items = product.get("items", [{}])
+        price_info = items[0].get("price", {}) if items else {}
+        price = price_info.get("regular") or price_info.get("promo")
+        return {
+            "name": product.get("description"),
+            "price": float(price) if price is not None else None,
+            "unit": items[0].get("size", "each") if items else "each",
+            "store_name": "Metro Market",
+        }
