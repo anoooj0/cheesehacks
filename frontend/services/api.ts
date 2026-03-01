@@ -27,11 +27,19 @@ export interface OptimizeResponse {
   nutrition_summary: Record<string, number>;
 }
 
+export interface MealMacros {
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+}
+
 export interface Meal {
   name: string;
   ingredients: string[];
   instructions: string;
   estimated_cost: number;
+  macros?: MealMacros | null;
 }
 
 export interface DayPlan {
@@ -108,6 +116,21 @@ export async function generateMealPlan(
 export async function getPrices(): Promise<GroceryItem[]> {
   const res = await fetch(`${BASE_URL}/prices/`);
   if (!res.ok) throw new Error('Failed to fetch prices');
+  return res.json();
+}
+
+export interface StoreLocation {
+  id: string;
+  name: string;
+  address: string;
+  lat: number;
+  lng: number;
+  phone?: string;
+}
+
+export async function getNearbyStores(lat: number, lng: number): Promise<StoreLocation[]> {
+  const res = await fetch(`${BASE_URL}/locations/?lat=${lat}&lng=${lng}`);
+  if (!res.ok) throw new Error('Failed to fetch store locations');
   return res.json();
 }
 

@@ -1,42 +1,46 @@
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
-  Modal,
+  Linking,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from 'react-native';
-import { CameraView, BarcodeScanningResult, useCameraPermissions } from 'expo-camera';
-import { useRouter } from 'expo-router';
+import MapView, { Marker } from 'react-native-maps';
+import * as Location from 'expo-location';
 
 import { useApp } from '@/context/AppContext';
-import { getPrices, lookupNutritionByBarcode, GroceryItem, NutritionLookupResponse } from '@/services/api';
+import { getPrices, GroceryItem, getNearbyStores, StoreLocation } from '@/services/api';
 
-const PRIMARY = '#0a7ea4';
-const GREEN = '#2e7d32';
+const PRIMARY = '#00E676';
+const DEFAULT_LAT = 43.0731;
+const DEFAULT_LNG = -89.4012; // Madison, WI fallback
 
-const STORE_LABELS: Record<string, string> = {
-  all: 'All Stores',
-  'metro-market': 'Metro Market',
+const FOOD_SECTIONS: Record<string, string[]> = {
+  All: [],
+  Proteins: ['chicken breast', 'ground beef', 'salmon', 'eggs', 'tuna', 'turkey', 'tofu', 'shrimp'],
+  Produce: ['bananas', 'apples', 'spinach', 'broccoli', 'sweet potato', 'carrots', 'tomatoes', 'avocado', 'oranges', 'grapes'],
+  Dairy: ['milk', 'greek yogurt', 'cheese', 'butter', 'cottage cheese'],
+  Grains: ['brown rice', 'oats', 'bread', 'pasta', 'quinoa'],
+  Pantry: ['black beans', 'peanut butter', 'olive oil', 'almonds', 'lentils'],
+};
+
+const SECTION_ICONS: Record<string, string> = {
+  All: '⊞',
+  Proteins: '🥩',
+  Produce: '🥦',
+  Dairy: '🥛',
+  Grains: '🌾',
+  Pantry: '🥫',
 };
 
 function capitalize(s: string) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function formatValue(value: number | null, unit: string) {
-  if (value == null) return '--';
-  return `${value.toFixed(1)}${unit}`;
-}
-
-function hasNutritionData(facts: NutritionLookupResponse['nutrition_per_serving']) {
-  return Object.values(facts).some((v) => v != null);
-}
-
-/** Group flat list by category, sort each group cheapest first */
 function groupByCategory(items: GroceryItem[]): Record<string, GroceryItem[]> {
   const map: Record<string, GroceryItem[]> = {};
   for (const item of items) {
@@ -44,28 +48,42 @@ function groupByCategory(items: GroceryItem[]): Record<string, GroceryItem[]> {
     if (!map[key]) map[key] = [];
     map[key].push(item);
   }
-  // Sort each group cheapest first
   for (const key of Object.keys(map)) {
     map[key].sort((a, b) => a.price - b.price);
   }
   return map;
 }
 
+function haversineMiles(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 3958.8;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.asin(Math.sqrt(a));
+}
+
+function openDirections(store: StoreLocation) {
+  const url =
+    Platform.select({
+      ios: `maps://app?daddr=${store.lat},${store.lng}`,
+      android: `geo:${store.lat},${store.lng}?q=${encodeURIComponent(store.address)}`,
+    }) ?? `https://www.google.com/maps/dir/?api=1&destination=${store.lat},${store.lng}`;
+  Linking.openURL(url);
+}
+
 export default function HomeScreen() {
-  const router = useRouter();
-  const [permission, requestPermission] = useCameraPermissions();
-  const { addScannedItem, mealPlanResult, addManualItem, manualCartItems } = useApp();
+  const { addManualItem, manualCartItems, nutritionGoals } = useApp();
 
   const [prices, setPrices] = useState<GroceryItem[]>([]);
   const [pricesLoading, setPricesLoading] = useState(true);
-  const [selectedStore, setSelectedStore] = useState('all');
+  const [selectedSection, setSelectedSection] = useState('All');
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
 
-  const [scannerVisible, setScannerVisible] = useState(false);
-  const [barcode, setBarcode] = useState<string | null>(null);
-  const [lookupLoading, setLookupLoading] = useState(false);
-  const [nutrition, setNutrition] = useState<NutritionLookupResponse | null>(null);
-  const scanLock = React.useRef(false);
+  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [stores, setStores] = useState<StoreLocation[]>([]);
+  const [storesLoading, setStoresLoading] = useState(true);
 
   useEffect(() => {
     getPrices()
@@ -74,318 +92,324 @@ export default function HomeScreen() {
       .finally(() => setPricesLoading(false));
   }, []);
 
-  const stores = ['all', ...Array.from(new Set(prices.map((p) => p.store_id)))];
-  const filteredPrices =
-    selectedStore === 'all' ? prices : prices.filter((p) => p.store_id === selectedStore);
-
-  const grouped = groupByCategory(filteredPrices);
-  const categories = Object.keys(grouped).sort();
-
-  async function openScanner() {
-    if (!permission?.granted) {
-      const res = await requestPermission();
-      if (!res.granted) {
-        Alert.alert('Camera access required', 'Enable camera access to scan barcodes.');
-        return;
+  useEffect(() => {
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        let lat = DEFAULT_LAT;
+        let lng = DEFAULT_LNG;
+        if (status === 'granted') {
+          const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+          lat = pos.coords.latitude;
+          lng = pos.coords.longitude;
+          setUserLocation({ latitude: lat, longitude: lng });
+        }
+        const nearby = await getNearbyStores(lat, lng);
+        setStores(nearby);
+      } catch {
+        // silently fall back to empty store list
+      } finally {
+        setStoresLoading(false);
       }
-    }
-    setScannerVisible(true);
-  }
+    })();
+  }, []);
 
-  async function handleBarcodeScanned(result: BarcodeScanningResult) {
-    if (!scannerVisible || scanLock.current) return;
-    const scanned = result.data?.trim();
-    if (!scanned) return;
+  const mapCenter = userLocation ?? { latitude: DEFAULT_LAT, longitude: DEFAULT_LNG };
 
-    scanLock.current = true;
-    setScannerVisible(false);
-    setBarcode(scanned);
-    setNutrition(null);
-
-    try {
-      setLookupLoading(true);
-      const data = await lookupNutritionByBarcode(scanned);
-      setNutrition(data);
-    } catch {
-      Alert.alert('Not found', 'No nutrition data found for this barcode.');
-    } finally {
-      setLookupLoading(false);
-      scanLock.current = false;
-    }
-  }
-
-  function handleAddToCart() {
-    if (!nutrition) return;
-    addScannedItem(nutrition);
-    Alert.alert('Added', `${nutrition.product_name || 'Item'} added to cart.`);
-    setNutrition(null);
-    setBarcode(null);
-  }
-
-  const nutritionFacts =
-    nutrition && hasNutritionData(nutrition.nutrition_per_serving)
-      ? nutrition.nutrition_per_serving
-      : nutrition?.nutrition_per_100g ?? null;
-  const servingLabel =
-    nutrition && hasNutritionData(nutrition.nutrition_per_serving)
-      ? nutrition.serving_size || 'per serving'
-      : 'per 100g';
+  const grouped = groupByCategory(prices);
+  const allCategories = Object.keys(grouped).sort();
+  const sectionTerms = FOOD_SECTIONS[selectedSection] ?? [];
+  const categories =
+    selectedSection === 'All'
+      ? allCategories
+      : allCategories.filter((cat) => sectionTerms.includes(cat));
 
   return (
-    <>
-      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-        <View style={styles.header}>
-          <Text style={styles.title}>Grocery Optimizer</Text>
-          <Text style={styles.subtitle}>Compare prices. Eat smart. Spend smarter.</Text>
-        </View>
-
-        {/* ── Store Prices ── */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Price Comparison</Text>
-
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.storeTabs}>
-            {stores.map((s) => (
-              <TouchableOpacity
-                key={s}
-                style={[styles.storeTab, selectedStore === s && styles.storeTabSelected]}
-                onPress={() => setSelectedStore(s)}>
-                <Text style={[styles.storeTabText, selectedStore === s && styles.storeTabTextSelected]}>
-                  {STORE_LABELS[s] ?? s}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-
-          {pricesLoading ? (
-            <View style={styles.loadingRow}>
-              <ActivityIndicator color={PRIMARY} />
-              <Text style={styles.loadingText}>Loading live prices...</Text>
-            </View>
-          ) : categories.length === 0 ? (
-            <Text style={styles.emptyNote}>No items available</Text>
-          ) : (
-            categories.map((cat) => {
-              const items = grouped[cat];
-              const cheapest = items[0];
-              const isExpanded = expandedCategory === cat;
-
-              return (
-                <View key={cat} style={styles.categoryBlock}>
-                  {/* Category header — shows cheapest price */}
-                  <TouchableOpacity
-                    style={styles.categoryRow}
-                    onPress={() => setExpandedCategory(isExpanded ? null : cat)}
-                    activeOpacity={0.7}>
-                    <View style={styles.categoryLeft}>
-                      <Text style={styles.categoryName}>{capitalize(cat)}</Text>
-                      <Text style={styles.categoryBest}>
-                        Best: ${cheapest.price.toFixed(2)} · {cheapest.store_name}
-                      </Text>
-                    </View>
-                    <View style={styles.categoryRight}>
-                      <View style={styles.bestBadge}>
-                        <Text style={styles.bestBadgeText}>
-                          {items.length} option{items.length !== 1 ? 's' : ''}
-                        </Text>
-                      </View>
-                      <Text style={styles.chevron}>{isExpanded ? '▲' : '▼'}</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* Expanded: all options sorted cheapest first */}
-                  {isExpanded && items.map((item, i) => {
-                    const cartQty = manualCartItems.find((e) => e.item.id === item.id)?.quantity ?? 0;
-                    return (
-                      <View key={item.id} style={[styles.priceRow, i === 0 && styles.priceRowBest]}>
-                        <View style={styles.priceRowLeft}>
-                          {i === 0 && (
-                            <View style={styles.cheapestTag}>
-                              <Text style={styles.cheapestTagText}>BEST</Text>
-                            </View>
-                          )}
-                          <Text style={styles.itemName} numberOfLines={2}>{item.name}</Text>
-                          <Text style={styles.itemMeta}>{item.store_name} · {item.unit}</Text>
-                        </View>
-                        <View style={styles.priceRowRight}>
-                          <Text style={[styles.itemPrice, i === 0 && styles.itemPriceBest]}>
-                            ${item.price.toFixed(2)}
-                          </Text>
-                          <TouchableOpacity
-                            style={styles.addBtn}
-                            onPress={() => addManualItem(item)}
-                            activeOpacity={0.7}>
-                            <Text style={styles.addBtnText}>+</Text>
-                            {cartQty > 0 && (
-                              <View style={styles.qtyBadge}>
-                                <Text style={styles.qtyBadgeText}>{cartQty}</Text>
-                              </View>
-                            )}
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                    );
-                  })}
-                </View>
-              );
-            })
-          )}
-        </View>
-
-        {/* ── Barcode Scanner ── */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Scan a Product</Text>
-          <Text style={styles.sectionSub}>
-            Scan a UPC or EAN barcode to look up nutrition facts and add it to your cart.
-          </Text>
-
-          <TouchableOpacity style={styles.scanButton} onPress={openScanner}>
-            <Text style={styles.scanButtonText}>Open Barcode Scanner</Text>
-          </TouchableOpacity>
-
-          {barcode && <Text style={styles.barcodeText}>Barcode: {barcode}</Text>}
-
-          {lookupLoading && (
-            <View style={styles.loadingRow}>
-              <ActivityIndicator color={PRIMARY} />
-              <Text style={styles.loadingText}>Looking up nutrition...</Text>
-            </View>
-          )}
-
-          {nutrition && nutritionFacts && (
-            <View style={styles.nutritionCard}>
-              <Text style={styles.nutritionTitle}>
-                {nutrition.product_name || 'Unknown product'}
-              </Text>
-              <Text style={styles.nutritionMeta}>
-                {[nutrition.brand, nutrition.quantity].filter(Boolean).join(' · ') || nutrition.barcode}
-              </Text>
-              <Text style={styles.nutritionMeta}>Nutrition {servingLabel}</Text>
-
-              {(
-                [
-                  ['Calories', formatValue(nutritionFacts.calories, ' kcal')],
-                  ['Protein', formatValue(nutritionFacts.protein_g, ' g')],
-                  ['Carbs', formatValue(nutritionFacts.carbs_g, ' g')],
-                  ['Fat', formatValue(nutritionFacts.fat_g, ' g')],
-                  ['Fiber', formatValue(nutritionFacts.fiber_g, ' g')],
-                  ['Sugar', formatValue(nutritionFacts.sugars_g, ' g')],
-                  ['Sodium', formatValue(nutritionFacts.sodium_mg, ' mg')],
-                ] as [string, string][]
-              ).map(([label, value]) => (
-                <View key={label} style={styles.nutritionRow}>
-                  <Text style={styles.nutritionLabel}>{label}</Text>
-                  <Text style={styles.nutritionValue}>{value}</Text>
-                </View>
-              ))}
-
-              <TouchableOpacity style={styles.addButton} onPress={handleAddToCart}>
-                <Text style={styles.addButtonText}>+ Add to Cart</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-        </View>
-
-        {/* ── Meal Plan ── */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Meal Plan</Text>
-          {mealPlanResult ? (
-            <View style={styles.mealPlanCard}>
-              <Text style={styles.mealPlanTitle}>
-                {mealPlanResult.meal_plan.length}-Day Plan Active
-              </Text>
-              <Text style={styles.mealPlanMeta}>
-                Est. total: ${mealPlanResult.total_cost.toFixed(2)}
-              </Text>
-              <TouchableOpacity
-                style={styles.viewPlanButton}
-                onPress={() => router.push('/(tabs)/meal-plan')}>
-                <Text style={styles.viewPlanText}>View Full Plan</Text>
-              </TouchableOpacity>
-            </View>
-          ) : (
-            <View style={styles.mealPlanCard}>
-              <Text style={styles.mealPlanMeta}>No meal plan yet.</Text>
-              <Text style={[styles.mealPlanMeta, { marginBottom: 12 }]}>
-                Go to Cart and tap "Generate Meal Plan".
-              </Text>
-              <TouchableOpacity
-                style={styles.viewPlanButton}
-                onPress={() => router.push('/(tabs)/cart')}>
-                <Text style={styles.viewPlanText}>Go to Cart</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-        </View>
-      </ScrollView>
-
-      {/* Camera Modal */}
-      <Modal
-        visible={scannerVisible}
-        animationType="slide"
-        onRequestClose={() => setScannerVisible(false)}>
-        <View style={styles.modalContainer}>
-          <CameraView
-            style={styles.camera}
-            facing="back"
-            barcodeScannerSettings={{ barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e'] }}
-            onBarcodeScanned={handleBarcodeScanned}
-          />
-          <View style={styles.cameraOverlay}>
-            <View style={styles.scanFrame} />
-            <Text style={styles.cameraHint}>Center the barcode inside the frame</Text>
-            <TouchableOpacity
-              style={styles.closeButton}
-              onPress={() => setScannerVisible(false)}>
-              <Text style={styles.closeButtonText}>Close</Text>
-            </TouchableOpacity>
+    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      <View style={styles.header}>
+        <View style={styles.logoRow}>
+          <View style={styles.logoIcon}>
+            <Text style={styles.logoEmoji}>🧀</Text>
+          </View>
+          <View>
+            <Text style={styles.title}>NutriLens</Text>
+            <Text style={styles.subtitle}>Smart Grocery · Madison WI</Text>
           </View>
         </View>
-      </Modal>
-    </>
+      </View>
+
+      {/* ── Nearby Stores ── */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Nearby Stores</Text>
+
+        {storesLoading ? (
+          <View style={styles.loadingRow}>
+            <ActivityIndicator color={PRIMARY} />
+            <Text style={styles.loadingText}>Finding stores near you...</Text>
+          </View>
+        ) : stores.length === 0 ? (
+          <Text style={styles.emptyNote}>No stores found nearby</Text>
+        ) : (
+          <>
+            <MapView
+              style={styles.map}
+              initialRegion={{
+                latitude: mapCenter.latitude,
+                longitude: mapCenter.longitude,
+                latitudeDelta: 0.06,
+                longitudeDelta: 0.06,
+              }}>
+              {userLocation && (
+                <Marker
+                  coordinate={userLocation}
+                  title="You are here"
+                  pinColor="#00E676"
+                />
+              )}
+              {stores.map((store) => (
+                <Marker
+                  key={store.id}
+                  coordinate={{ latitude: store.lat, longitude: store.lng }}
+                  title={store.name}
+                  description={store.address}
+                />
+              ))}
+            </MapView>
+
+            <View style={styles.storeList}>
+              {stores.map((store, idx) => {
+                const dist = userLocation
+                  ? haversineMiles(userLocation.latitude, userLocation.longitude, store.lat, store.lng)
+                  : null;
+                return (
+                  <View key={store.id} style={[styles.storeRow, idx > 0 && styles.storeRowBorder]}>
+                    <View style={styles.storeRowLeft}>
+                      <View style={styles.storeNameRow}>
+                        <Text style={styles.storeIcon}>🏪</Text>
+                        <Text style={styles.storeName} numberOfLines={1}>{store.name}</Text>
+                      </View>
+                      <Text style={styles.storeAddress} numberOfLines={2}>{store.address}</Text>
+                      {dist != null && (
+                        <Text style={styles.storeDist}>{dist.toFixed(1)} mi away</Text>
+                      )}
+                    </View>
+                    <TouchableOpacity
+                      style={styles.dirBtn}
+                      onPress={() => openDirections(store)}
+                      activeOpacity={0.8}>
+                      <Text style={styles.dirBtnText}>Directions</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              })}
+            </View>
+          </>
+        )}
+      </View>
+
+      {/* ── Price Comparison ── */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Price Comparison</Text>
+
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.storeTabs}>
+          {Object.keys(FOOD_SECTIONS).map((section) => (
+            <TouchableOpacity
+              key={section}
+              style={[styles.storeTab, selectedSection === section && styles.storeTabSelected]}
+              onPress={() => { setSelectedSection(section); setExpandedCategory(null); }}>
+              <Text style={[styles.storeTabText, selectedSection === section && styles.storeTabTextSelected]}>
+                {SECTION_ICONS[section]} {section}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+
+        {pricesLoading ? (
+          <View style={styles.loadingRow}>
+            <ActivityIndicator color={PRIMARY} />
+            <Text style={styles.loadingText}>Loading live prices...</Text>
+          </View>
+        ) : categories.length === 0 ? (
+          <Text style={styles.emptyNote}>No items available</Text>
+        ) : (
+          categories.map((cat) => {
+            const items = grouped[cat];
+            const cheapest = items[0];
+            const isExpanded = expandedCategory === cat;
+
+            return (
+              <View key={cat} style={styles.categoryBlock}>
+                <TouchableOpacity
+                  style={styles.categoryRow}
+                  onPress={() => setExpandedCategory(isExpanded ? null : cat)}
+                  activeOpacity={0.7}>
+                  <View style={styles.categoryLeft}>
+                    <Text style={styles.categoryName}>{capitalize(cat)}</Text>
+                    <Text style={styles.categoryBest}>
+                      Best: ${cheapest.price.toFixed(2)} · {cheapest.store_name}
+                    </Text>
+                  </View>
+                  <View style={styles.categoryRight}>
+                    <View style={styles.bestBadge}>
+                      <Text style={styles.bestBadgeText}>
+                        {items.length} option{items.length !== 1 ? 's' : ''}
+                      </Text>
+                    </View>
+                    <Text style={styles.chevron}>{isExpanded ? '▲' : '▼'}</Text>
+                  </View>
+                </TouchableOpacity>
+
+                {isExpanded && items.map((item, i) => {
+                  const cartQty = manualCartItems.find((e) => e.item.id === item.id)?.quantity ?? 0;
+                  return (
+                    <View key={item.id} style={[styles.priceRow, i === 0 && styles.priceRowBest]}>
+                      <View style={styles.priceRowLeft}>
+                        {i === 0 && (
+                          <View style={styles.cheapestTag}>
+                            <Text style={styles.cheapestTagText}>BEST</Text>
+                          </View>
+                        )}
+                        <Text style={styles.itemName} numberOfLines={2}>{item.name}</Text>
+                        <Text style={styles.itemMeta}>{item.store_name} · {item.unit}</Text>
+                        {item.calories_per_unit > 0 && (
+                          <Text style={styles.itemMacros}>
+                            {item.calories_per_unit} cal · {item.protein_per_unit}g P · {item.carbs_per_unit}g C · {item.fat_per_unit}g F
+                            <Text style={styles.itemMacrosNote}> /100g</Text>
+                          </Text>
+                        )}
+                        {nutritionGoals && item.calories_per_unit > 0 && (
+                          <View style={styles.coverageRow}>
+                            {[
+                              { pct: Math.round(item.calories_per_unit / nutritionGoals.calories * 100), label: 'Cal', color: '#FF6B35', bg: 'rgba(255,107,53,0.12)' },
+                              { pct: Math.round(item.protein_per_unit / nutritionGoals.protein_g * 100), label: 'Pro', color: '#00B4D8', bg: 'rgba(0,180,216,0.12)' },
+                              { pct: Math.round(item.carbs_per_unit / nutritionGoals.carbs_g * 100), label: 'Carb', color: '#A78BFA', bg: 'rgba(167,139,250,0.12)' },
+                              { pct: Math.round(item.fat_per_unit / nutritionGoals.fat_g * 100), label: 'Fat', color: '#FCD34D', bg: 'rgba(252,211,77,0.12)' },
+                            ].map(({ pct, label, color, bg }) => (
+                              <View key={label} style={[styles.coveragePill, { backgroundColor: bg }]}>
+                                <Text style={[styles.coverageText, { color }]}>{label} {pct}%</Text>
+                              </View>
+                            ))}
+                          </View>
+                        )}
+                      </View>
+                      <View style={styles.priceRowRight}>
+                        <Text style={[styles.itemPrice, i === 0 && styles.itemPriceBest]}>
+                          ${item.price.toFixed(2)}
+                        </Text>
+                        <TouchableOpacity
+                          style={styles.addBtn}
+                          onPress={() => addManualItem(item)}
+                          activeOpacity={0.7}>
+                          <Text style={styles.addBtnText}>+</Text>
+                          {cartQty > 0 && (
+                            <View style={styles.qtyBadge}>
+                              <Text style={styles.qtyBadgeText}>{cartQty}</Text>
+                            </View>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            );
+          })
+        )}
+      </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f5f7fa' },
+  container: { flex: 1, backgroundColor: '#0A0F1E' },
   content: { padding: 20, paddingBottom: 48 },
-  header: { marginBottom: 28, marginTop: 12 },
-  title: { fontSize: 28, fontWeight: '700', color: '#11181C' },
-  subtitle: { fontSize: 15, color: '#687076', marginTop: 4 },
+
+  header: { marginBottom: 24, marginTop: 12 },
+  logoRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  logoIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: 'rgba(0,230,118,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,230,118,0.25)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logoEmoji: { fontSize: 22 },
+  title: { fontSize: 20, fontWeight: '800', color: '#E2E8F0', letterSpacing: -0.5 },
+  subtitle: { fontSize: 12, color: '#64748B', marginTop: 1 },
 
   section: {
-    backgroundColor: '#fff',
+    backgroundColor: '#0F1629',
     borderRadius: 16,
     padding: 16,
     marginBottom: 16,
     borderWidth: 1,
-    borderColor: '#e8edf2',
+    borderColor: '#1E2A42',
   },
-  sectionTitle: { fontSize: 16, fontWeight: '700', color: '#11181C', marginBottom: 12 },
-  sectionSub: { fontSize: 13, color: '#687076', marginBottom: 14, lineHeight: 18 },
+  sectionTitle: { fontSize: 16, fontWeight: '700', color: '#E2E8F0', marginBottom: 12 },
 
+  // Map
+  map: {
+    width: '100%',
+    height: 210,
+    borderRadius: 12,
+    marginBottom: 12,
+    overflow: 'hidden',
+  },
+
+  // Store list
+  storeList: { gap: 0 },
+  storeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+  },
+  storeRowBorder: {
+    borderTopWidth: 1,
+    borderTopColor: '#1E2A42',
+  },
+  storeRowLeft: { flex: 1, gap: 3 },
+  storeNameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  storeIcon: { fontSize: 14 },
+  storeName: { fontSize: 14, fontWeight: '700', color: '#E2E8F0', flex: 1 },
+  storeAddress: { fontSize: 12, color: '#64748B', lineHeight: 16 },
+  storeDist: { fontSize: 11, color: '#00E676', fontWeight: '600', marginTop: 1 },
+  dirBtn: {
+    backgroundColor: 'rgba(0,230,118,0.12)',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(0,230,118,0.3)',
+    marginLeft: 10,
+  },
+  dirBtnText: { fontSize: 12, color: '#00E676', fontWeight: '700' },
+
+  // Price comparison
   storeTabs: { marginBottom: 12 },
   storeTab: {
     paddingHorizontal: 14,
     paddingVertical: 7,
     borderRadius: 20,
     borderWidth: 1.5,
-    borderColor: '#e0e0e0',
+    borderColor: '#1E2A42',
     marginRight: 8,
-    backgroundColor: '#f9f9f9',
+    backgroundColor: '#12183A',
   },
-  storeTabSelected: { backgroundColor: PRIMARY, borderColor: PRIMARY },
-  storeTabText: { fontSize: 13, color: '#687076', fontWeight: '500' },
-  storeTabTextSelected: { color: '#fff' },
+  storeTabSelected: { backgroundColor: '#00E676', borderColor: '#00E676' },
+  storeTabText: { fontSize: 13, color: '#64748B', fontWeight: '500' },
+  storeTabTextSelected: { color: '#070C18' },
 
-  emptyNote: { fontSize: 14, color: '#687076', marginTop: 8, textAlign: 'center' },
+  emptyNote: { fontSize: 14, color: '#64748B', marginTop: 8, textAlign: 'center' },
   loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8 },
-  loadingText: { fontSize: 14, color: '#687076' },
+  loadingText: { fontSize: 14, color: '#64748B' },
 
-  // Category accordion
   categoryBlock: {
-    borderRadius: 10,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#e8edf2',
+    borderColor: '#1E2A42',
     marginBottom: 8,
     overflow: 'hidden',
   },
@@ -393,61 +417,64 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     padding: 12,
-    backgroundColor: '#f9fafb',
+    backgroundColor: '#12183A',
   },
   categoryLeft: { flex: 1 },
-  categoryName: { fontSize: 14, fontWeight: '700', color: '#11181C', textTransform: 'capitalize' },
-  categoryBest: { fontSize: 12, color: GREEN, marginTop: 2, fontWeight: '600' },
+  categoryName: { fontSize: 14, fontWeight: '700', color: '#E2E8F0', textTransform: 'capitalize' },
+  categoryBest: { fontSize: 12, color: '#00E676', marginTop: 2, fontWeight: '600' },
   categoryRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   bestBadge: {
-    backgroundColor: '#e0f2fe',
+    backgroundColor: 'rgba(0,230,118,0.12)',
     borderRadius: 12,
     paddingHorizontal: 8,
     paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: 'rgba(0,230,118,0.25)',
   },
-  bestBadgeText: { fontSize: 11, color: PRIMARY, fontWeight: '600' },
-  chevron: { fontSize: 11, color: '#687076' },
+  bestBadgeText: { fontSize: 11, color: '#00E676', fontWeight: '600' },
+  chevron: { fontSize: 11, color: '#64748B' },
 
-  // Price rows inside expanded category
   priceRow: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderTopWidth: 1,
-    borderTopColor: '#f0f0f0',
-    backgroundColor: '#fff',
+    borderTopColor: '#1A2238',
+    backgroundColor: '#0F1629',
   },
-  priceRowBest: { backgroundColor: '#f0fdf4' },
+  priceRowBest: { backgroundColor: 'rgba(0,230,118,0.06)' },
   priceRowLeft: { flex: 1, gap: 2 },
   cheapestTag: {
     alignSelf: 'flex-start',
-    backgroundColor: GREEN,
+    backgroundColor: '#00E676',
     borderRadius: 4,
     paddingHorizontal: 6,
     paddingVertical: 1,
     marginBottom: 3,
   },
-  cheapestTagText: { fontSize: 9, color: '#fff', fontWeight: '700', letterSpacing: 0.5 },
-  itemName: { fontSize: 13, fontWeight: '600', color: '#11181C' },
-  itemMeta: { fontSize: 11, color: '#687076' },
+  cheapestTagText: { fontSize: 9, color: '#070C18', fontWeight: '700', letterSpacing: 0.5 },
+  itemName: { fontSize: 13, fontWeight: '600', color: '#E2E8F0' },
+  itemMeta: { fontSize: 11, color: '#64748B' },
+  itemMacros: { fontSize: 10, color: '#64748B', marginTop: 2 },
+  itemMacrosNote: { fontSize: 9, color: '#475569' },
   priceRowRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  itemPrice: { fontSize: 15, fontWeight: '700', color: PRIMARY },
-  itemPriceBest: { color: GREEN },
+  itemPrice: { fontSize: 15, fontWeight: '700', color: '#94A3B8' },
+  itemPriceBest: { color: '#00E676' },
   addBtn: {
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: PRIMARY,
+    backgroundColor: '#00E676',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  addBtnText: { color: '#fff', fontSize: 20, lineHeight: 22, fontWeight: '700' },
+  addBtnText: { color: '#070C18', fontSize: 20, lineHeight: 22, fontWeight: '700' },
   qtyBadge: {
     position: 'absolute',
     top: -6,
     right: -6,
-    backgroundColor: GREEN,
+    backgroundColor: '#FF6B35',
     borderRadius: 8,
     minWidth: 16,
     paddingHorizontal: 3,
@@ -455,73 +482,7 @@ const styles = StyleSheet.create({
   },
   qtyBadgeText: { color: '#fff', fontSize: 9, fontWeight: '700' },
 
-  scanButton: {
-    backgroundColor: '#11181C',
-    borderRadius: 12,
-    paddingVertical: 14,
-    alignItems: 'center',
-  },
-  scanButtonText: { color: '#fff', fontSize: 15, fontWeight: '700' },
-  barcodeText: { marginTop: 10, fontSize: 13, color: '#687076' },
-
-  nutritionCard: {
-    marginTop: 16,
-    paddingTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#e8edf2',
-    gap: 8,
-  },
-  nutritionTitle: { fontSize: 17, fontWeight: '700', color: '#11181C' },
-  nutritionMeta: { fontSize: 13, color: '#687076' },
-  nutritionRow: { flexDirection: 'row', justifyContent: 'space-between' },
-  nutritionLabel: { fontSize: 14, color: '#334155' },
-  nutritionValue: { fontSize: 14, fontWeight: '600', color: '#11181C' },
-
-  addButton: {
-    backgroundColor: GREEN,
-    borderRadius: 10,
-    paddingVertical: 12,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  addButtonText: { color: '#fff', fontSize: 15, fontWeight: '700' },
-
-  mealPlanCard: { gap: 6 },
-  mealPlanTitle: { fontSize: 15, fontWeight: '700', color: '#11181C' },
-  mealPlanMeta: { fontSize: 13, color: '#687076' },
-  viewPlanButton: {
-    backgroundColor: PRIMARY,
-    borderRadius: 10,
-    paddingVertical: 12,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  viewPlanText: { color: '#fff', fontSize: 14, fontWeight: '700' },
-
-  modalContainer: { flex: 1, backgroundColor: '#000' },
-  camera: { flex: 1 },
-  cameraOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-    backgroundColor: 'rgba(0,0,0,0.35)',
-  },
-  scanFrame: {
-    width: '88%',
-    height: 180,
-    borderRadius: 20,
-    borderWidth: 3,
-    borderColor: '#fff',
-    backgroundColor: 'transparent',
-  },
-  cameraHint: { marginTop: 24, color: '#fff', fontSize: 15, textAlign: 'center' },
-  closeButton: {
-    marginTop: 24,
-    backgroundColor: '#fff',
-    borderRadius: 999,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-  },
-  closeButtonText: { color: '#11181C', fontWeight: '700' },
+  coverageRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 5 },
+  coveragePill: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 },
+  coverageText: { fontSize: 10, fontWeight: '700' },
 });
