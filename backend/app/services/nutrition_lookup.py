@@ -91,10 +91,13 @@ def _extract_nutrition(nutriments: dict[str, Any], suffix: str) -> NutritionFact
 async def lookup_barcode_nutrition(barcode: str) -> NutritionLookupResponse:
     async with httpx.AsyncClient(timeout=10.0, headers=OPEN_FOOD_FACTS_HEADERS) as client:
         for candidate in _barcode_variants(barcode):
-            response = await client.get(
-                f"{OPEN_FOOD_FACTS_URL}/{candidate}",
-                params={"fields": OPEN_FOOD_FACTS_FIELDS},
-            )
+            try:
+                response = await client.get(
+                    f"{OPEN_FOOD_FACTS_URL}/{candidate}",
+                    params={"fields": OPEN_FOOD_FACTS_FIELDS},
+                )
+            except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout):
+                continue
 
             if response.status_code == 404:
                 continue
