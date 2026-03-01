@@ -20,11 +20,12 @@ const GREEN = '#2e7d32';
 
 const STORE_LABELS: Record<string, string> = {
   all: 'All Stores',
-  walmart: 'Walmart',
-  kroger: 'Kroger',
-  aldi: 'Aldi',
-  target: 'Target',
+  'metro-market': 'Metro Market',
 };
+
+function capitalize(s: string) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
 function formatValue(value: number | null, unit: string) {
   if (value == null) return '--';
@@ -35,21 +36,36 @@ function hasNutritionData(facts: NutritionLookupResponse['nutrition_per_serving'
   return Object.values(facts).some((v) => v != null);
 }
 
+/** Group flat list by category, sort each group cheapest first */
+function groupByCategory(items: GroceryItem[]): Record<string, GroceryItem[]> {
+  const map: Record<string, GroceryItem[]> = {};
+  for (const item of items) {
+    const key = item.category || 'other';
+    if (!map[key]) map[key] = [];
+    map[key].push(item);
+  }
+  // Sort each group cheapest first
+  for (const key of Object.keys(map)) {
+    map[key].sort((a, b) => a.price - b.price);
+  }
+  return map;
+}
+
 export default function HomeScreen() {
   const router = useRouter();
   const [permission, requestPermission] = useCameraPermissions();
-  const { addScannedItem, mealPlanResult } = useApp();
+  const { addScannedItem, mealPlanResult, addManualItem, manualCartItems } = useApp();
 
-  // Store prices
   const [prices, setPrices] = useState<GroceryItem[]>([]);
   const [pricesLoading, setPricesLoading] = useState(true);
   const [selectedStore, setSelectedStore] = useState('all');
+  const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
 
-  // Barcode scanner
   const [scannerVisible, setScannerVisible] = useState(false);
   const [barcode, setBarcode] = useState<string | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
   const [nutrition, setNutrition] = useState<NutritionLookupResponse | null>(null);
+  const scanLock = React.useRef(false);
 
   useEffect(() => {
     getPrices()
@@ -61,6 +77,9 @@ export default function HomeScreen() {
   const stores = ['all', ...Array.from(new Set(prices.map((p) => p.store_id)))];
   const filteredPrices =
     selectedStore === 'all' ? prices : prices.filter((p) => p.store_id === selectedStore);
+
+  const grouped = groupByCategory(filteredPrices);
+  const categories = Object.keys(grouped).sort();
 
   async function openScanner() {
     if (!permission?.granted) {
@@ -74,10 +93,11 @@ export default function HomeScreen() {
   }
 
   async function handleBarcodeScanned(result: BarcodeScanningResult) {
-    if (!scannerVisible) return;
+    if (!scannerVisible || scanLock.current) return;
     const scanned = result.data?.trim();
     if (!scanned) return;
 
+    scanLock.current = true;
     setScannerVisible(false);
     setBarcode(scanned);
     setNutrition(null);
@@ -90,6 +110,7 @@ export default function HomeScreen() {
       Alert.alert('Not found', 'No nutrition data found for this barcode.');
     } finally {
       setLookupLoading(false);
+      scanLock.current = false;
     }
   }
 
@@ -115,17 +136,12 @@ export default function HomeScreen() {
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
         <View style={styles.header}>
           <Text style={styles.title}>Grocery Optimizer</Text>
-          <Text style={styles.subtitle}>Eat smart. Spend smarter.</Text>
+          <Text style={styles.subtitle}>Compare prices. Eat smart. Spend smarter.</Text>
         </View>
 
         {/* ── Store Prices ── */}
         <View style={styles.section}>
-          <View style={styles.sectionRow}>
-            <Text style={styles.sectionTitle}>Store Prices</Text>
-            <View style={styles.badge}>
-              <Text style={styles.badgeText}>Kroger API soon</Text>
-            </View>
-          </View>
+          <Text style={styles.sectionTitle}>Price Comparison</Text>
 
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.storeTabs}>
             {stores.map((s) => (
@@ -141,19 +157,77 @@ export default function HomeScreen() {
           </ScrollView>
 
           {pricesLoading ? (
-            <ActivityIndicator color={PRIMARY} style={{ marginTop: 16 }} />
-          ) : filteredPrices.length === 0 ? (
+            <View style={styles.loadingRow}>
+              <ActivityIndicator color={PRIMARY} />
+              <Text style={styles.loadingText}>Loading live prices...</Text>
+            </View>
+          ) : categories.length === 0 ? (
             <Text style={styles.emptyNote}>No items available</Text>
           ) : (
-            filteredPrices.slice(0, 8).map((item, i) => (
-              <View key={i} style={styles.priceRow}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.itemName}>{item.name}</Text>
-                  <Text style={styles.itemMeta}>{item.store_name} · {item.unit}</Text>
+            categories.map((cat) => {
+              const items = grouped[cat];
+              const cheapest = items[0];
+              const isExpanded = expandedCategory === cat;
+
+              return (
+                <View key={cat} style={styles.categoryBlock}>
+                  {/* Category header — shows cheapest price */}
+                  <TouchableOpacity
+                    style={styles.categoryRow}
+                    onPress={() => setExpandedCategory(isExpanded ? null : cat)}
+                    activeOpacity={0.7}>
+                    <View style={styles.categoryLeft}>
+                      <Text style={styles.categoryName}>{capitalize(cat)}</Text>
+                      <Text style={styles.categoryBest}>
+                        Best: ${cheapest.price.toFixed(2)} · {cheapest.store_name}
+                      </Text>
+                    </View>
+                    <View style={styles.categoryRight}>
+                      <View style={styles.bestBadge}>
+                        <Text style={styles.bestBadgeText}>
+                          {items.length} option{items.length !== 1 ? 's' : ''}
+                        </Text>
+                      </View>
+                      <Text style={styles.chevron}>{isExpanded ? '▲' : '▼'}</Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* Expanded: all options sorted cheapest first */}
+                  {isExpanded && items.map((item, i) => {
+                    const cartQty = manualCartItems.find((e) => e.item.id === item.id)?.quantity ?? 0;
+                    return (
+                      <View key={item.id} style={[styles.priceRow, i === 0 && styles.priceRowBest]}>
+                        <View style={styles.priceRowLeft}>
+                          {i === 0 && (
+                            <View style={styles.cheapestTag}>
+                              <Text style={styles.cheapestTagText}>BEST</Text>
+                            </View>
+                          )}
+                          <Text style={styles.itemName} numberOfLines={2}>{item.name}</Text>
+                          <Text style={styles.itemMeta}>{item.store_name} · {item.unit}</Text>
+                        </View>
+                        <View style={styles.priceRowRight}>
+                          <Text style={[styles.itemPrice, i === 0 && styles.itemPriceBest]}>
+                            ${item.price.toFixed(2)}
+                          </Text>
+                          <TouchableOpacity
+                            style={styles.addBtn}
+                            onPress={() => addManualItem(item)}
+                            activeOpacity={0.7}>
+                            <Text style={styles.addBtnText}>+</Text>
+                            {cartQty > 0 && (
+                              <View style={styles.qtyBadge}>
+                                <Text style={styles.qtyBadgeText}>{cartQty}</Text>
+                              </View>
+                            )}
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    );
+                  })}
                 </View>
-                <Text style={styles.itemPrice}>${item.price.toFixed(2)}</Text>
-              </View>
-            ))
+              );
+            })
           )}
         </View>
 
@@ -286,17 +360,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e8edf2',
   },
-  sectionRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
-  sectionTitle: { fontSize: 16, fontWeight: '700', color: '#11181C', flex: 1 },
+  sectionTitle: { fontSize: 16, fontWeight: '700', color: '#11181C', marginBottom: 12 },
   sectionSub: { fontSize: 13, color: '#687076', marginBottom: 14, lineHeight: 18 },
-
-  badge: {
-    backgroundColor: '#fff3e0',
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-  },
-  badgeText: { fontSize: 11, color: '#e65100', fontWeight: '600' },
 
   storeTabs: { marginBottom: 12 },
   storeTab: {
@@ -312,17 +377,83 @@ const styles = StyleSheet.create({
   storeTabText: { fontSize: 13, color: '#687076', fontWeight: '500' },
   storeTabTextSelected: { color: '#fff' },
 
+  emptyNote: { fontSize: 14, color: '#687076', marginTop: 8, textAlign: 'center' },
+  loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8 },
+  loadingText: { fontSize: 14, color: '#687076' },
+
+  // Category accordion
+  categoryBlock: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e8edf2',
+    marginBottom: 8,
+    overflow: 'hidden',
+  },
+  categoryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    backgroundColor: '#f9fafb',
+  },
+  categoryLeft: { flex: 1 },
+  categoryName: { fontSize: 14, fontWeight: '700', color: '#11181C', textTransform: 'capitalize' },
+  categoryBest: { fontSize: 12, color: GREEN, marginTop: 2, fontWeight: '600' },
+  categoryRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  bestBadge: {
+    backgroundColor: '#e0f2fe',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  bestBadgeText: { fontSize: 11, color: PRIMARY, fontWeight: '600' },
+  chevron: { fontSize: 11, color: '#687076' },
+
+  // Price rows inside expanded category
   priceRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    paddingHorizontal: 12,
     paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
+    borderTopWidth: 1,
+    borderTopColor: '#f0f0f0',
+    backgroundColor: '#fff',
   },
-  itemName: { fontSize: 14, fontWeight: '600', color: '#11181C' },
-  itemMeta: { fontSize: 12, color: '#687076', marginTop: 2 },
+  priceRowBest: { backgroundColor: '#f0fdf4' },
+  priceRowLeft: { flex: 1, gap: 2 },
+  cheapestTag: {
+    alignSelf: 'flex-start',
+    backgroundColor: GREEN,
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    marginBottom: 3,
+  },
+  cheapestTagText: { fontSize: 9, color: '#fff', fontWeight: '700', letterSpacing: 0.5 },
+  itemName: { fontSize: 13, fontWeight: '600', color: '#11181C' },
+  itemMeta: { fontSize: 11, color: '#687076' },
+  priceRowRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   itemPrice: { fontSize: 15, fontWeight: '700', color: PRIMARY },
-  emptyNote: { fontSize: 14, color: '#687076', marginTop: 8, textAlign: 'center' },
+  itemPriceBest: { color: GREEN },
+  addBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: PRIMARY,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addBtnText: { color: '#fff', fontSize: 20, lineHeight: 22, fontWeight: '700' },
+  qtyBadge: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    backgroundColor: GREEN,
+    borderRadius: 8,
+    minWidth: 16,
+    paddingHorizontal: 3,
+    alignItems: 'center',
+  },
+  qtyBadgeText: { color: '#fff', fontSize: 9, fontWeight: '700' },
 
   scanButton: {
     backgroundColor: '#11181C',
@@ -332,9 +463,6 @@ const styles = StyleSheet.create({
   },
   scanButtonText: { color: '#fff', fontSize: 15, fontWeight: '700' },
   barcodeText: { marginTop: 10, fontSize: 13, color: '#687076' },
-
-  loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 14 },
-  loadingText: { fontSize: 14, color: '#687076' },
 
   nutritionCard: {
     marginTop: 16,
@@ -370,7 +498,6 @@ const styles = StyleSheet.create({
   },
   viewPlanText: { color: '#fff', fontSize: 14, fontWeight: '700' },
 
-  // Camera
   modalContainer: { flex: 1, backgroundColor: '#000' },
   camera: { flex: 1 },
   cameraOverlay: {

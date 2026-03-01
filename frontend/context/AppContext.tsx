@@ -1,5 +1,10 @@
 import React, { createContext, useContext, useState } from 'react';
-import { OptimizeResponse, MealPlanResponse, NutritionLookupResponse } from '@/services/api';
+import { GroceryItem, OptimizeResponse, MealPlanResponse, NutritionLookupResponse } from '@/services/api';
+
+export interface ManualCartEntry {
+  item: GroceryItem;
+  quantity: number;
+}
 
 interface AppState {
   budget: string;
@@ -17,6 +22,10 @@ interface AppState {
   scannedItems: NutritionLookupResponse[];
   addScannedItem: (item: NutritionLookupResponse) => void;
   removeScannedItem: (barcode: string) => void;
+  manualCartItems: ManualCartEntry[];
+  addManualItem: (item: GroceryItem) => void;
+  removeManualItem: (id: string) => void;
+  updateManualQty: (id: string, delta: number) => void;
 }
 
 const AppContext = createContext<AppState | null>(null);
@@ -29,6 +38,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [cartResult, setCartResult] = useState<OptimizeResponse | null>(null);
   const [mealPlanResult, setMealPlanResult] = useState<MealPlanResponse | null>(null);
   const [scannedItems, setScannedItems] = useState<NutritionLookupResponse[]>([]);
+  const [manualCartItems, setManualCartItems] = useState<ManualCartEntry[]>([]);
 
   function addScannedItem(item: NutritionLookupResponse) {
     setScannedItems((prev) => [...prev, item]);
@@ -36,6 +46,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   function removeScannedItem(barcode: string) {
     setScannedItems((prev) => prev.filter((i) => i.barcode !== barcode));
+  }
+
+  function addManualItem(item: GroceryItem) {
+    setManualCartItems((prev) => {
+      const existing = prev.find((e) => e.item.id === item.id);
+      if (existing) return prev.map((e) => e.item.id === item.id ? { ...e, quantity: e.quantity + 1 } : e);
+      return [...prev, { item, quantity: 1 }];
+    });
+  }
+
+  function removeManualItem(id: string) {
+    setManualCartItems((prev) => prev.filter((e) => e.item.id !== id));
+  }
+
+  function updateManualQty(id: string, delta: number) {
+    setManualCartItems((prev) =>
+      prev.map((e) => e.item.id === id ? { ...e, quantity: Math.max(1, e.quantity + delta) } : e)
+    );
   }
 
   return (
@@ -48,6 +76,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         cartResult, setCartResult,
         mealPlanResult, setMealPlanResult,
         scannedItems, addScannedItem, removeScannedItem,
+        manualCartItems, addManualItem, removeManualItem, updateManualQty,
       }}>
       {children}
     </AppContext.Provider>

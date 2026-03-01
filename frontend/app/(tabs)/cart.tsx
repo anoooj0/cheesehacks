@@ -33,6 +33,48 @@ function OptimizedCartItem({ item }: { item: CartItem }) {
   );
 }
 
+function ManualCartItemRow({
+  name,
+  storeName,
+  unit,
+  price,
+  quantity,
+  onAdd,
+  onSubtract,
+  onRemove,
+}: {
+  name: string;
+  storeName: string;
+  unit: string;
+  price: number;
+  quantity: number;
+  onAdd: () => void;
+  onSubtract: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <View style={styles.card}>
+      <View style={styles.cardLeft}>
+        <Text style={styles.itemName}>{name}</Text>
+        <Text style={styles.itemMeta}>{storeName} · {unit}</Text>
+        <Text style={styles.itemMeta}>${(price * quantity).toFixed(2)} total</Text>
+      </View>
+      <View style={styles.qtyControls}>
+        <TouchableOpacity style={styles.qtyBtn} onPress={onSubtract}>
+          <Text style={styles.qtyBtnText}>−</Text>
+        </TouchableOpacity>
+        <Text style={styles.qtyValue}>{quantity}</Text>
+        <TouchableOpacity style={styles.qtyBtn} onPress={onAdd}>
+          <Text style={styles.qtyBtnText}>+</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.removeButton} onPress={onRemove}>
+          <Text style={styles.removeText}>Remove</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
 function ScannedCartItem({
   item,
   onRemove,
@@ -64,14 +106,20 @@ function ScannedCartItem({
 
 export default function CartScreen() {
   const router = useRouter();
-  const { cartResult, dietaryPreferences, numDays, setMealPlanResult, scannedItems, removeScannedItem } = useApp();
+  const { cartResult, dietaryPreferences, numDays, setMealPlanResult, scannedItems, removeScannedItem, manualCartItems, removeManualItem, updateManualQty } = useApp();
   const [loading, setLoading] = useState(false);
 
   async function handleGenerateMealPlan() {
-    if (!cartResult) return;
+    const manualAsCartItems: CartItem[] = manualCartItems.map((e) => ({
+      item: e.item,
+      quantity: e.quantity,
+      total_cost: e.item.price * e.quantity,
+    }));
+    const cartItems = cartResult ? cartResult.cart : manualAsCartItems;
+    if (cartItems.length === 0) return;
     try {
       setLoading(true);
-      const result = await generateMealPlan(cartResult.cart, dietaryPreferences, numDays);
+      const result = await generateMealPlan(cartItems, dietaryPreferences, numDays);
       setMealPlanResult(result);
       router.push('/(tabs)/meal-plan');
     } catch {
@@ -81,7 +129,7 @@ export default function CartScreen() {
     }
   }
 
-  const isEmpty = !cartResult && scannedItems.length === 0;
+  const isEmpty = !cartResult && scannedItems.length === 0 && manualCartItems.length === 0;
 
   if (isEmpty) {
     return (
@@ -116,6 +164,38 @@ export default function CartScreen() {
             <Text style={styles.bannerValue}>{cartResult.cart.length}</Text>
             <Text style={styles.bannerLabel}>Items</Text>
           </View>
+        </View>
+      )}
+
+      {/* Manual Cart Items */}
+      {manualCartItems.length > 0 && (
+        <View style={styles.section}>
+          <Text style={styles.sectionHeader}>My Cart</Text>
+          {manualCartItems.map((entry) => (
+            <ManualCartItemRow
+              key={entry.item.id}
+              name={entry.item.name}
+              storeName={entry.item.store_name}
+              unit={entry.item.unit}
+              price={entry.item.price}
+              quantity={entry.quantity}
+              onAdd={() => updateManualQty(entry.item.id, 1)}
+              onSubtract={() => updateManualQty(entry.item.id, -1)}
+              onRemove={() => removeManualItem(entry.item.id)}
+            />
+          ))}
+          {!cartResult && (
+            <TouchableOpacity
+              style={[styles.button, loading && styles.buttonDisabled]}
+              onPress={handleGenerateMealPlan}
+              disabled={loading}>
+              {loading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.buttonText}>Generate Meal Plan</Text>
+              )}
+            </TouchableOpacity>
+          )}
         </View>
       )}
 
@@ -198,14 +278,27 @@ const styles = StyleSheet.create({
   itemPrice: { fontSize: 17, fontWeight: '700', color: PRIMARY },
   itemQty: { fontSize: 12, color: '#687076', marginTop: 2 },
 
+  qtyControls: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  qtyBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#f0f0f0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  qtyBtnText: { fontSize: 16, color: '#11181C', lineHeight: 18 },
+  qtyValue: { fontSize: 15, fontWeight: '700', color: '#11181C', minWidth: 20, textAlign: 'center' },
+
   removeButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#e0e0e0',
+    marginLeft: 4,
   },
-  removeText: { fontSize: 12, color: '#687076', fontWeight: '600' },
+  removeText: { fontSize: 11, color: '#687076', fontWeight: '600' },
 
   button: {
     backgroundColor: GREEN,
